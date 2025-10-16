@@ -7,9 +7,12 @@
     },
     {
       "name": "iaero-points-api",
-      "source": "/apps/points-api",
-      "healthcheckPath": "/health",
       "port": 8080,
+      "healthcheckPath": "/health",
+      "build": {
+        "dockerfilePath": "apps/points-api/Dockerfile",
+        "rootDir": "apps/points-api"
+      },
       "env": {
         "DATABASE_URL": { "fromService": "iaero-postgres", "env": "DATABASE_URL" },
         "PORT": "8080"
@@ -17,9 +20,12 @@
     },
     {
       "name": "iaero-points-indexer",
-      "source": "/apps/points-indexer",
-      "healthcheckPath": "/health",
       "port": 8090,
+      "healthcheckPath": "/health",
+      "build": {
+        "dockerfilePath": "apps/points-indexer/Dockerfile",
+        "rootDir": "apps/points-indexer"
+      },
       "env": {
         "DATABASE_URL": { "fromService": "iaero-postgres", "env": "DATABASE_URL" },
         "RPC_URL": "",
