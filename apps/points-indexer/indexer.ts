@@ -1,4 +1,3 @@
-// indexer.ts
 /* eslint-disable no-console */
 import 'dotenv/config';
 import fs from 'fs';
@@ -7,28 +6,49 @@ import http from 'http';
 import { Client as PgClient } from 'pg';
 import * as ethersAll from 'ethers';
 
-// ---- Config ----
-const CONFIRMATIONS = Number(process.env.CONFIRMATIONS ?? 3);
-const STEP = Number(process.env.STEP ?? 2000);
-const POLL_MS = Number(process.env.POLL_MS ?? 6000);
-const HEALTH_PORT = Number(process.env.HEALTH_PORT ?? 8090);
-const START_BLOCK = Number(process.env.START_BLOCK ?? 0);
+// ---------- ENV (typed & coerced) ----------
+const {
+  DATABASE_URL: DATABASE_URL_RAW = '',
+  RPC_URL: RPC_URL_RAW = process.env.RPC_URL_BASE || '',
+  TARGETS: TARGETS_RAW = process.env.EPOCH_DIST || '',
+  START_BLOCK: START_BLOCK_RAW,
+  CONFIRMATIONS: CONFIRMATIONS_RAW = '5',
+  STEP: STEP_RAW = '2000',
+  POLL_MS: POLL_MS_RAW = '6000',
+  HEALTH_PORT: HEALTH_PORT_RAW = '8090',
+} = process.env;
 
+// strings (for drivers/URLs)
+const DATABASE_URL: string = String(DATABASE_URL_RAW);
+const RPC_URL: string = String(RPC_URL_RAW);
+
+// numbers (for math/comparisons/timers)
+const START_BLOCK_NUM: number = Number(START_BLOCK_RAW ?? 0);
+const CONFIRMATIONS_NUM: number = Number(CONFIRMATIONS_RAW);
+const STEP_NUM: number = Number(STEP_RAW);
+const POLL_MS_NUM: number = Number(POLL_MS_RAW);
+const HEALTH_PORT_NUM: number = Number(HEALTH_PORT_RAW);
+
+// targets list (array of hex addresses as strings)
+const TARGETS_ARR: string[] = String(TARGETS_RAW || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 if (!DATABASE_URL) throw new Error('DATABASE_URL is required');
 if (!RPC_URL) throw new Error('RPC_URL (or RPC_URL_BASE) is required');
-if (!TARGETS) console.warn('[warn] No TARGETS/EPOCH_DIST set; you may see logs=0');
+if (!TARGETS_ARR.length) console.warn('[warn] No TARGETS/EPOCH_DIST set; you may see logs=0');
 
-const CONF_LAG = Math.max(0, parseInt(CONFIRMATIONS, 10) || 0);
-const STEP_SIZE = Math.min(25_000, Math.max(1000, parseInt(STEP, 10) || 2000));
-const POLL_INTERVAL = Math.max(2000, parseInt(POLL_MS, 10) || 6000);
+// Derived tunables
+const CONF_LAG = Math.max(0, CONFIRMATIONS_NUM);
+const STEP_SIZE = Math.min(25_000, Math.max(1000, STEP_NUM));
+const POLL_INTERVAL = Math.max(2000, POLL_MS_NUM);
 
 // ---- Ethers v5/v6 compatibility ----
 type AnyInterface = any;
 function makeInterface(abi: any): AnyInterface {
   const anyE = ethersAll as any;
 
-  // If ABI is human-readable strings and v6 parseAbi exists, convert first
   const looksLikeHumanReadable =
     Array.isArray(abi) && abi.length > 0 && typeof abi[0] === 'string';
 
@@ -37,8 +57,8 @@ function makeInterface(abi: any): AnyInterface {
       ? anyE.parseAbi(abi) // v6: turn strings into Fragments
       : abi;
 
-  if (anyE.Interface) return new anyE.Interface(parsed);                // v6
-  if (anyE.utils?.Interface) return new anyE.utils.Interface(parsed);   // v5
+  if (anyE.Interface) return new anyE.Interface(parsed); // v6
+  if (anyE.utils?.Interface) return new anyE.utils.Interface(parsed); // v5
   throw new Error('Unsupported ethers build: no Interface ctor');
 }
 
@@ -66,12 +86,10 @@ if (!Array.isArray(stakingAbi) || stakingAbi.length === 0) {
   process.exit(1);
 }
 
-
 function topicsForCompat(iface: AnyInterface, wantedNames: string[]) {
   const topics: string[] = [];
   const byName = new Map<string, any>();
 
-  // v6: build a name -> fragment map from Interface.fragments
   if (Array.isArray((iface as any).fragments)) {
     for (const f of (iface as any).fragments) {
       if (f && f.type === 'event' && f.name) byName.set(f.name, f);
@@ -81,23 +99,20 @@ function topicsForCompat(iface: AnyInterface, wantedNames: string[]) {
       const frag = byName.get(name);
       if (!frag) continue;
 
-      // 1) Preferred: let ethers v6 compute from the fragment
       try {
         topics.push((iface as any).getEventTopic(frag));
         continue;
-      } catch { /* fall through */ }
+      } catch {}
 
-      // 2) Fallback: compute topic from canonical signature
       try {
         const sig = `${frag.name}(${frag.inputs.map((i: any) => i.type).join(',')})`;
         const { keccak256, toUtf8Bytes } = (ethersAll as any);
         topics.push(keccak256(toUtf8Bytes(sig)));
         continue;
-      } catch { /* ignore; we'll try v5 path below */ }
+      } catch {}
     }
   }
 
-  // v5 fallback: iface.events map (if present)
   if (!topics.length && (iface as any).events) {
     const evs = Object.values((iface as any).events) as any[];
     for (const frag of evs) {
@@ -116,8 +131,6 @@ function topicsForCompat(iface: AnyInterface, wantedNames: string[]) {
   return topics;
 }
 
-
-
 console.log(
   '[abi] shape:',
   Array.isArray(stakingAbi) ? `array(len=${stakingAbi.length})` : typeof stakingAbi
@@ -125,7 +138,6 @@ console.log(
 if (Array.isArray(stakingAbi)) {
   console.log('[abi] first entry preview:', stakingAbi[0]);
 }
-
 
 const iface = makeInterface(stakingAbi as any);
 
@@ -155,27 +167,21 @@ async function runMigrations(defaultSeed?: bigint) {
   const dir = path.join(process.cwd(), 'migrations');
   const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => f.endsWith('.sql')).sort() : [];
 
-  // ✅ guard against undefined
   const seedStr = (defaultSeed ?? 0n).toString();
 
   for (const f of files) {
     let sql = fs.readFileSync(path.join(dir, f), 'utf8');
-
-    // Replace ${START_BLOCK} tokens (if present) with a concrete number
     sql = sql.replace(/\$\{START_BLOCK\}/g, seedStr);
-
     if (!sql.trim()) continue;
     await pg.query(sql);
   }
   console.log('[boot] migrations complete');
 }
 
-
-
 async function ensureCheckpoint(defaultSeed: bigint) {
   const res = await pg.query('select last_block from indexing_checkpoint limit 1');
   if (res.rowCount === 0) {
-    const seed = START_BLOCK ? BigInt(START_BLOCK) : defaultSeed;
+    const seed = START_BLOCK_NUM ? BigInt(START_BLOCK_NUM) : defaultSeed;
     await pg.query('insert into indexing_checkpoint(last_block) values ($1)', [seed.toString()]);
     return seed;
   }
@@ -222,10 +228,10 @@ function isDesiredTopic(log: RawLog) {
 
 // ---- Backoff wrapper for getLogs ----
 async function getLogsWithRetry(
-  range: { fromBlock: bigint; toBlock: bigint; },
+  range: { fromBlock: bigint; toBlock: bigint },
   addresses: string[],
   topics: string[]
-) {
+): Promise<RawLog[]> {
   const maxAttempts = 6;
   let delay = 750; // ms
   let attempt = 0;
@@ -262,10 +268,9 @@ async function getLogsWithRetry(
 }
 
 // ---- Targets ----
-const TARGET_ADDRS = TARGETS.split(',').map(s => s.trim()).filter(Boolean).map(hexlifyAddress);
+const TARGET_ADDRS = TARGETS_ARR.map(hexlifyAddress);
 if (TARGET_ADDRS.length) {
   console.log('[boot] target contracts:', TARGET_ADDRS);
-  // PATCH #3: also log topics
   console.log('[boot] topics:', INTERESTING_TOPICS);
 }
 
@@ -296,7 +301,6 @@ function toByteaParam(hexAddr: string) {
   return toNo0x(hexAddr);
 }
 
-// Format a bigint "wei-days" amount into a NUMERIC(60,18) string (token-days)
 function decimalFromWei(wei: bigint): string {
   const q = wei / WEI;
   const r = wei % WEI;
@@ -304,7 +308,6 @@ function decimalFromWei(wei: bigint): string {
   return `${q}.${frac}`;
 }
 
-// Inclusive start (s) to exclusive end (e) seconds iterator of UTC day chunks.
 function* splitByUtcDays(s: bigint, e: bigint): Generator<[string, bigint]> {
   if (e <= s) return;
   const nextMidnight = (t: bigint) => {
@@ -317,7 +320,7 @@ function* splitByUtcDays(s: bigint, e: bigint): Generator<[string, bigint]> {
     const nm = nextMidnight(cur);
     const sliceEnd = e < nm ? e : nm;
     const d = new Date(Number(cur) * 1000);
-    const dayStr = d.toISOString().slice(0, 10); // YYYY-MM-DD
+    const dayStr = d.toISOString().slice(0, 10);
     yield [dayStr, sliceEnd - cur];
     cur = sliceEnd;
   }
@@ -372,7 +375,6 @@ async function addLeaderboard(addressHex: string, tokenDaysDelta: string) {
   );
 }
 
-// Accumulates wei-days from (prevTs -> ts) at a constant balance
 async function accruePoints(addressHex: string, balanceWei: bigint, prevTs: bigint, ts: bigint) {
   if (ts <= prevTs || balanceWei <= 0n) return 0n;
 
@@ -395,7 +397,7 @@ async function adjustBalanceWithAccrual(addressHex: string, amountWeiDelta: bigi
   try {
     const current = await getWalletRow(addressHex);
     let last_balance = current ? current.last_balance : 0n;
-    let last_ts = current ? current.last_ts : ts; // if new wallet, start now
+    let last_ts = current ? current.last_ts : ts;
     let points_wei_days = current ? current.points_wei_days : 0n;
 
     const inc = await accruePoints(addressHex, last_balance, last_ts, ts);
@@ -437,6 +439,21 @@ async function insertClaim(txHashHex: string, logIndex: number, addressHex: stri
 }
 
 // ---------- Event dispatcher ----------
+type ParsedLog = {
+  name: string;
+  args: any;
+  log: RawLog;
+};
+
+function parseLog(log: RawLog): ParsedLog | null {
+  try {
+    const parsed = iface.parseLog({ data: log.data, topics: log.topics });
+    return { name: parsed?.name, args: parsed?.args, log };
+  } catch {
+    return null;
+  }
+}
+
 async function handleParsedLog(p: ParsedLog, blockTime: number) {
   const name = p.name;
   const log = p.log;
@@ -444,25 +461,16 @@ async function handleParsedLog(p: ParsedLog, blockTime: number) {
   const ts = BigInt(blockTime);
 
   const addrUser = p.args?.user ? toNo0x(String(p.args.user)) : '';
-  // const addrFunder = p.args?.funder ? toNo0x(String(p.args.funder)) : ''; // available if needed
   const amountWei = p.args?.amount != null ? BigInt(p.args.amount.toString()) : 0n;
 
   switch (name) {
-    case 'Staked': {
-      if (!addrUser) return;
-      await adjustBalanceWithAccrual(addrUser, amountWei, ts);
-      return;
-    }
+    case 'Staked':
     case 'StakedFor': {
       if (!addrUser) return;
       await adjustBalanceWithAccrual(addrUser, amountWei, ts);
       return;
     }
-    case 'Unstaked': {
-      if (!addrUser) return;
-      await adjustBalanceWithAccrual(addrUser, -amountWei, ts);
-      return;
-    }
+    case 'Unstaked':
     case 'Exited': {
       if (!addrUser) return;
       await adjustBalanceWithAccrual(addrUser, -amountWei, ts);
@@ -527,7 +535,6 @@ async function liveTail(startFrom: bigint) {
   const onNewHead = async () => {
     try {
       const head = await getBlockNumber();
-      // PATCH #2: guard against negative safe head
       const safeHead = head > BigInt(CONF_LAG) ? head - BigInt(CONF_LAG) : 0n;
       if (safeHead <= startFrom) return;
 
@@ -551,7 +558,6 @@ async function liveTail(startFrom: bigint) {
             await handleParsedLog(p, ts);
             count++;
           }
-          // Reorg handling optional if you reduce CONFIRMATIONS.
         }
       }
 
@@ -587,12 +593,12 @@ const server = http.createServer(async (_req, res) => {
       lastCheckpoint = await readCheckpoint().catch(() => lastCheckpoint);
       const body = JSON.stringify({
         ok: true,
-        name: 'iaero-points-indexer',           // PATCH #5
+        name: 'iaero-points-indexer',
         chainId,
         checkpoint: lastCheckpoint.toString(),
         head: head ? head.toString() : null,
-        lag: head ? (Number(head - lastCheckpoint)) : null,
-        targets: TARGET_ADDRS,                  // PATCH #5
+        lag: head ? Number(head - lastCheckpoint) : null,
+        targets: TARGET_ADDRS,
       });
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(body);
@@ -618,7 +624,7 @@ const server = http.createServer(async (_req, res) => {
   const head = await getBlockNumber();
   const safeHeadInit = head > BigInt(CONF_LAG) ? head - BigInt(CONF_LAG) : 0n;
 
-  await runMigrations(safeHeadInit);  
+  await runMigrations(safeHeadInit);
   let checkpoint = await ensureCheckpoint(safeHeadInit);
 
   console.log(`[init] checkpoint=${checkpoint} head=${safeHeadInit}`);
@@ -627,8 +633,8 @@ const server = http.createServer(async (_req, res) => {
   }
 
   lastCheckpoint = checkpoint;
-  server.listen(Number(HEALTH_PORT), () => {
-    console.log(`[health] listening on :${HEALTH_PORT}`);
+  server.listen(HEALTH_PORT_NUM, '0.0.0.0', () => {
+    console.log(`[health] listening on :${HEALTH_PORT_NUM}`);
   });
 
   const stopLive = await liveTail(checkpoint);
