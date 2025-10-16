@@ -8,16 +8,12 @@ import { Client as PgClient } from 'pg';
 import * as ethersAll from 'ethers';
 
 // ---- Config ----
-const {
-  DATABASE_URL = '',
-  RPC_URL = process.env.RPC_URL_BASE || '',
-  TARGETS = process.env.EPOCH_DIST || '',
-  START_BLOCK,
-  CONFIRMATIONS = '3',
-  STEP = '2000',
-  POLL_MS = '6000',
-  HEALTH_PORT = '8090',
-} = process.env;
+const CONFIRMATIONS = Number(process.env.CONFIRMATIONS ?? 3);
+const STEP = Number(process.env.STEP ?? 2000);
+const POLL_MS = Number(process.env.POLL_MS ?? 6000);
+const HEALTH_PORT = Number(process.env.HEALTH_PORT ?? 8090);
+const START_BLOCK = Number(process.env.START_BLOCK ?? 0);
+
 
 if (!DATABASE_URL) throw new Error('DATABASE_URL is required');
 if (!RPC_URL) throw new Error('RPC_URL (or RPC_URL_BASE) is required');
