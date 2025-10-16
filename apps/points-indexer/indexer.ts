@@ -18,8 +18,6 @@ const {
   HEALTH_PORT: HEALTH_PORT_RAW = '8090',
 } = process.env;
 
-console.log('[env] START_BLOCK_RAW=', START_BLOCK_RAW, 'parsed=', START_BLOCK_NUM);
-
 const FORCE_BACKFILL = String(process.env.FORCE_BACKFILL || '0') === '1';
 
 
@@ -35,6 +33,7 @@ const POLL_MS_NUM: number = Number(POLL_MS_RAW);
 const HEALTH_PORT_NUM: number = Number(HEALTH_PORT_RAW);
 const HEARTBEAT_EVERY_SEC = Number(process.env.HEARTBEAT_EVERY_SEC || 300); // 5 min
 
+console.log('[env] START_BLOCK_RAW=', START_BLOCK_RAW, 'parsed=', START_BLOCK_NUM);
 
 // targets list (array of hex addresses as strings)
 const TARGETS_ARR: string[] = String(TARGETS_RAW || '')
