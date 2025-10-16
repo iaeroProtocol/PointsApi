@@ -27,11 +27,6 @@ function verifyZealySignature(req: FastifyRequest, raw: Buffer | string): boolea
 async function main() {
   const app: FastifyInstance = await build();
 
-  // Minimal health (keep only here OR only in routes.ts — not both)
-  app.get('/health', async (_req: FastifyRequest, reply: FastifyReply) => {
-    reply.code(200).send({ ok: true });
-  });
-
   // --- Raw body support for Zealy on Fastify v4 (no plugin) ---
   // Keep raw buffer for application/json ONLY on /webhooks/zealy
   app.addContentTypeParser(
