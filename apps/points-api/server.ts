@@ -1,23 +1,15 @@
 // apps/points-api/server.ts
 import 'dotenv/config';
 import fastify, { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { build } from './routes.js';
+import { build } from './routes.js'; // if you're ESM/NodeNext. If CJS, drop the .js
 import crypto from 'node:crypto';
-// If this plugin is missing/incompatible, we won't crash on startup.
-let fastifyRawBody: any;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  fastifyRawBody = (await import('fastify-raw-body')).default ?? (await import('fastify-raw-body'));
-} catch {
-  fastifyRawBody = null;
-}
 
 const port = Number(process.env.PORT ?? 8080);
 const host = '0.0.0.0';
 const ZEALY_SECRET = process.env.ZEALY_SECRET ?? ''; // set in Railway
 
 function verifyZealySignature(req: FastifyRequest, raw: Buffer | string): boolean {
-  if (!ZEALY_SECRET) return true;
+  if (!ZEALY_SECRET) return true; // allow if not configured
   const sigHeader = req.headers['x-zealy-signature'];
   if (typeof sigHeader !== 'string' || !sigHeader.length) return false;
 
@@ -35,35 +27,45 @@ function verifyZealySignature(req: FastifyRequest, raw: Buffer | string): boolea
 async function main() {
   const app: FastifyInstance = await build();
 
-  // Best-effort rawBody: won’t block startup if the plugin isn’t available/compatible
-  if (fastifyRawBody) {
-    try {
-      await app.register(fastifyRawBody as unknown as any, {
-        field: 'rawBody',
-        global: false,
-        encoding: 'utf8',
-        runFirst: true,
-        routes: ['/webhooks/zealy'],
-      });
-    } catch (e) {
-      app.log.warn({ err: e }, 'fastify-raw-body failed to register; continuing without rawBody');
-    }
-  } else {
-    app.log.warn('fastify-raw-body not installed/loaded; continuing without rawBody');
-  }
+  // Minimal health (keep only here OR only in routes.ts — not both)
+  app.get('/health', async (_req: FastifyRequest, reply: FastifyReply) => {
+    reply.code(200).send({ ok: true });
+  });
 
-  // Signature guard (still works; if rawBody isn’t present we’ll verify against empty string)
+  // --- Raw body support for Zealy on Fastify v4 (no plugin) ---
+  // Keep raw buffer for application/json ONLY on /webhooks/zealy
+  app.addContentTypeParser(
+    'application/json',
+    { parseAs: 'buffer' }, // give us Buffer
+    (req, body, done) => {
+      // store raw buffer for signature verification
+      (req as any).rawBody = body as Buffer;
+
+      // parse JSON safely
+      try {
+        const parsed = body.length ? JSON.parse((body as Buffer).toString('utf8')) : {};
+        done(null, parsed);
+      } catch (err) {
+        (err as any).statusCode = 400;
+        done(err as any, undefined);
+      }
+    }
+  );
+
+  // Signature guard for the Zealy endpoint
   app.addHook('preValidation', async (req: FastifyRequest, reply: FastifyReply) => {
     if (req.url.startsWith('/webhooks/zealy')) {
-      const raw = (req as unknown as { rawBody?: string | Buffer }).rawBody ?? '';
+      const raw = (req as unknown as { rawBody?: Buffer | string }).rawBody ?? '';
       if (!verifyZealySignature(req, raw)) {
         return reply.code(401).send({ ok: false, error: 'bad_signature' });
       }
     }
   });
 
-  // Zealy webhook (kept minimal; won’t crash if rawBody is absent)
-  app.post('/webhooks/zealy', async (_req: FastifyRequest, reply: FastifyReply) => {
+  // Zealy webhook (will have parsed JSON body + rawBody Buffer)
+  app.post('/webhooks/zealy', async (req: FastifyRequest, reply: FastifyReply) => {
+    const payload = req.body as Record<string, unknown> | undefined;
+    // TODO: handle payload as needed
     return reply.send({ ok: true });
   });
 
