@@ -35,11 +35,6 @@ function verifyZealySignature(req: FastifyRequest, raw: Buffer | string): boolea
 async function main() {
   const app: FastifyInstance = await build();
 
-  // Redundant healthcheck at server level (so health is always up even if routes.ts changes)
-  app.get('/health', async (_req: FastifyRequest, reply: FastifyReply) => {
-    reply.code(200).send({ ok: true });
-  });
-
   // Best-effort rawBody: won’t block startup if the plugin isn’t available/compatible
   if (fastifyRawBody) {
     try {
