@@ -169,6 +169,7 @@ async function runMigrations(defaultSeed?: bigint) {
   console.log('[boot] running migrations…');
   const dir = path.join(process.cwd(), 'migrations');
   const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => f.endsWith('.sql')).sort() : [];
+  console.log(`[boot] migrations dir=${dir} files=${files.length ? files.join(', ') : '(none)'}`);
 
   const seedStr = (defaultSeed ?? 0n).toString();
 
@@ -176,10 +177,12 @@ async function runMigrations(defaultSeed?: bigint) {
     let sql = fs.readFileSync(path.join(dir, f), 'utf8');
     sql = sql.replace(/\$\{START_BLOCK\}/g, seedStr);
     if (!sql.trim()) continue;
+    console.log(`[boot] applying ${f}…`);
     await pg.query(sql);
   }
   console.log('[boot] migrations complete');
 }
+
 
 async function ensureCheckpoint(defaultSeed: bigint) {
   const res = await pg.query('select last_block from indexing_checkpoint limit 1');

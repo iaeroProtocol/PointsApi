@@ -23,6 +23,7 @@ EXPOSE 8090
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/migrations ./migrations
 COPY package*.json ./
 
 ENTRYPOINT ["/sbin/tini","--"]
