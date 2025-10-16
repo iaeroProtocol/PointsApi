@@ -18,6 +18,34 @@ function toHex(buf: Buffer) {
   return '0x' + buf.toString('hex');
 }
 
+function requireAdmin(req: FastifyRequest) {
+  const hdr = String(req.headers['authorization'] || '');
+  const tok = hdr.startsWith('Bearer ') ? hdr.slice(7) : '';
+  if (tok !== process.env.ZEALY_ADMIN_SECRET) {
+    const err: any = new Error('Unauthorized');
+    err.statusCode = 401;
+    throw err;
+  }
+}
+
+// Node 18+ has global fetch; no import needed
+async function pushXP(zealyUserId: string, amount: number, reason: string) {
+  const sub = process.env.ZEALY_SUBDOMAIN!;
+  const key = process.env.ZEALY_ADMIN_API_KEY!;
+  const url = `https://api-v2.zealy.io/public/communities/${encodeURIComponent(sub)}/users/${encodeURIComponent(zealyUserId)}/xp`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'x-api-key': key, 'content-type': 'application/json' },
+    body: JSON.stringify({ amount, reason }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Zealy XP push failed (${res.status}): ${await res.text().catch(()=>'')}`);
+  }
+}
+
+
 // ---------- tiny types ----------
 type AddressParams = { address: string };
 type LimitQuery = { limit?: string | number };
@@ -181,6 +209,85 @@ export async function build(): Promise<FastifyInstance> {
     );
     return { ok: (q.rowCount ?? 0) > 0 };
   });
+
+    // Link a wallet to a Zealy userId (you can call this from a one-time Zealy API task or an admin UI)
+    app.post('/admin/zealy/link', async (req: FastifyRequest, rep: FastifyReply) => {
+      requireAdmin(req);
+      const body = req.body as { zealyUserId?: string; wallet?: string };
+      const zealyUserId = String(body?.zealyUserId || '');
+      const wallet = String(body?.wallet || '').toLowerCase();
+  
+      if (!/^0x[0-9a-f]{40}$/.test(wallet) || !zealyUserId) {
+        return rep.code(400).send({ ok: false, error: 'bad_params' });
+      }
+  
+      const hex = wallet.slice(2);
+      await pool.query(
+        `INSERT INTO zealy_user_links(zealy_user_id, address)
+         VALUES ($1, decode($2,'hex'))
+         ON CONFLICT (zealy_user_id)
+         DO UPDATE SET address = EXCLUDED.address, linked_at = now()`,
+        [zealyUserId, hex]
+      );
+      return { ok: true };
+    });
+  
+    // Push XP to Zealy for top N leaderboard entries (idempotent: only deltas)
+    app.post('/admin/zealy/sync', async (req: FastifyRequest, rep: FastifyReply) => {
+      requireAdmin(req);
+  
+      const maxN = Math.min(Number(process.env.ZEALY_SYNC_MAX || 1000), 5000);
+      const factor = Number(process.env.ZEALY_XP_PER_POINT || 1);
+      const reason = String(process.env.ZEALY_SYNC_REASON || 'iAero staking points sync');
+  
+      const { rows } = await pool.query(
+        `
+        SELECT
+          encode(l.address, 'hex') AS address_hex,
+          l.points::numeric        AS points,
+          zul.zealy_user_id        AS zealy_user_id,
+          COALESCE(zxs.last_points_synced, 0)::numeric AS last_points_synced
+        FROM staking_points_leaderboard l
+        JOIN zealy_user_links zul ON zul.address = l.address
+        LEFT JOIN zealy_xp_sync zxs ON zxs.address = l.address
+        ORDER BY l.points DESC
+        LIMIT $1
+        `,
+        [maxN]
+      );
+  
+      let pushed = 0, skipped = 0, failed = 0;
+  
+      for (const r of rows) {
+        const totalPoints = Number(r.points);
+        const lastSynced  = Number(r.last_points_synced);
+        const delta       = totalPoints - lastSynced;
+  
+        // only push positive integer XP amounts
+        const amount = Math.floor(delta * factor);
+        if (!r.zealy_user_id || amount <= 0) { skipped++; continue; }
+  
+        try {
+          await pushXP(r.zealy_user_id, amount, reason);
+          pushed++;
+  
+          await pool.query(
+            `INSERT INTO zealy_xp_sync(address, last_points_synced)
+             VALUES (decode($1,'hex'), $2)
+             ON CONFLICT (address) DO UPDATE
+               SET last_points_synced = EXCLUDED.last_points_synced,
+                   updated_at = now()`,
+            [r.address_hex, totalPoints.toString()]
+          );
+        } catch (e) {
+          failed++;
+          req.log.error({ user: r.zealy_user_id, err: String(e) }, 'zealy push failed');
+        }
+      }
+  
+      return { ok: true, pushed, skipped, failed, processed: rows.length };
+    });
+  
 
   return app;
 }

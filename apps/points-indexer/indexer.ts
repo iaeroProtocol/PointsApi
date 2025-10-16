@@ -28,6 +28,8 @@ const CONFIRMATIONS_NUM: number = Number(CONFIRMATIONS_RAW);
 const STEP_NUM: number = Number(STEP_RAW);
 const POLL_MS_NUM: number = Number(POLL_MS_RAW);
 const HEALTH_PORT_NUM: number = Number(HEALTH_PORT_RAW);
+const HEARTBEAT_EVERY_SEC = Number(process.env.HEARTBEAT_EVERY_SEC || 300); // 5 min
+
 
 // targets list (array of hex addresses as strings)
 const TARGETS_ARR: string[] = String(TARGETS_RAW || '')
@@ -187,15 +189,33 @@ async function runMigrations(defaultSeed?: bigint) {
 async function ensureCheckpoint(defaultSeed: bigint) {
   const res = await pg.query('select last_block from indexing_checkpoint limit 1');
   if (res.rowCount === 0) {
-    const seed = START_BLOCK_NUM ? BigInt(START_BLOCK_NUM) : defaultSeed;
-    await pg.query('insert into indexing_checkpoint(last_block) values ($1)', [seed.toString()]);
-    return seed;
+    // Prefer explicit env START_BLOCK; else fall back to default (safe head)
+    const first = START_BLOCK_NUM ? BigInt(START_BLOCK_NUM) : defaultSeed;
+    await pg.query('insert into indexing_checkpoint(last_block) values ($1)', [first.toString()]);
+    return first;
   }
   return BigInt(res.rows[0].last_block);
 }
-async function saveCheckpoint(bn: bigint) {
-  await pg.query('update indexing_checkpoint set last_block=$1', [bn.toString()]);
+
+async function heartbeatAccrual(nowTs: bigint) {
+  // Accrue for wallets holding a balance whose last_ts < nowTs
+  const { rows } = await pg.query(
+    `SELECT encode(address,'hex') AS hex
+       FROM staking_points_wallet
+      WHERE last_balance > 0 AND last_ts < $1
+      LIMIT 2000`,
+    [nowTs.toString()],
+  );
+
+  for (const r of rows) {
+    const addrHex = String(r.hex);
+    // 0 delta => just accrue time and bump last_ts / points_wei_days
+    await adjustBalanceWithAccrual(addrHex, 0n, nowTs);
+  }
 }
+
+
+
 
 // ---- RPC helpers ----
 const provider = makeProvider(RPC_URL);
@@ -521,6 +541,8 @@ async function backfill(from: bigint, to: bigint) {
   return latestBlock;
 }
 
+let lastHeartbeat = 0n;
+
 async function liveTail(startFrom: bigint) {
   console.log('[live] subscribing to new blocks…');
 
@@ -528,40 +550,55 @@ async function liveTail(startFrom: bigint) {
     try {
       const head = await getBlockNumber();
       const safeHead = head > BigInt(CONF_LAG) ? head - BigInt(CONF_LAG) : 0n;
-      if (safeHead <= startFrom) return;
 
-      const logs = await getLogsWithRetry({ fromBlock: startFrom + 1n, toBlock: safeHead }, TARGET_ADDRS, INTERESTING_TOPICS);
-      const wanted = logs.filter(isDesiredTopic);
+      // Process new blocks if any
+      if (safeHead > startFrom) {
+        const logs = await getLogsWithRetry(
+          { fromBlock: startFrom + 1n, toBlock: safeHead },
+          TARGET_ADDRS,
+          INTERESTING_TOPICS
+        );
+        const wanted = logs.filter(isDesiredTopic);
 
-      const byBlock = new Map<number, RawLog[]>();
-      for (const l of wanted) {
-        const arr = byBlock.get(l.blockNumber) || [];
-        arr.push(l);
-        byBlock.set(l.blockNumber, arr);
-      }
+        const byBlock = new Map<number, RawLog[]>();
+        for (const l of wanted) {
+          const arr = byBlock.get(l.blockNumber) || [];
+          arr.push(l);
+          byBlock.set(l.blockNumber, arr);
+        }
 
-      let count = 0;
-      for (const [bn, arr] of byBlock) {
-        const blk = await getBlock(bn);
-        const ts = Number(blk?.timestamp ?? 0);
-        for (const l of arr) {
-          const p = parseLog(l);
-          if (p && !l.removed) {
-            await handleParsedLog(p, ts);
-            count++;
+        let count = 0;
+        for (const [bn, arr] of byBlock) {
+          const blk = await getBlock(bn);
+          const ts = Number(blk?.timestamp ?? 0);
+          for (const l of arr) {
+            const p = parseLog(l);
+            if (p && !l.removed) {
+              await handleParsedLog(p, ts);
+              count++;
+            }
           }
         }
+
+        startFrom = safeHead;
+        await saveCheckpoint(startFrom);
+        latestBlock = startFrom;
+        console.log(`[live] logs=${count} at block ${startFrom}`);
       }
 
-      startFrom = safeHead;
-      await saveCheckpoint(startFrom);
-      latestBlock = startFrom;
-      console.log(`[live] logs=${count} at block ${startFrom}`);
+      // Heartbeat accrual (runs even if no new blocks)
+      const now = BigInt(Math.floor(Date.now() / 1000));
+      if (HEARTBEAT_EVERY_SEC > 0 && (now - lastHeartbeat) >= BigInt(HEARTBEAT_EVERY_SEC)) {
+        await heartbeatAccrual(now);
+        lastHeartbeat = now;
+        console.log('[live] heartbeat accrual done at', now.toString());
+      }
     } catch (e) {
       console.error('[live] error:', e);
     }
   };
 
+  // subscribe or poll
   if ((provider as any).on && typeof (provider as any).on === 'function') {
     (provider as any).on('block', () => void onNewHead());
     const interval = setInterval(() => void onNewHead(), POLL_INTERVAL);
@@ -571,6 +608,7 @@ async function liveTail(startFrom: bigint) {
     return () => clearInterval(interval);
   }
 }
+
 
 // ---- Health endpoint (useful for Railway) ----
 let lastCheckpoint: bigint = 0n;
