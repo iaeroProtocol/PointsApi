@@ -38,7 +38,10 @@ const TARGETS_ARR: string[] = String(TARGETS_RAW || '')
 if (!DATABASE_URL) throw new Error('DATABASE_URL is required');
 if (!RPC_URL) throw new Error('RPC_URL (or RPC_URL_BASE) is required');
 if (!TARGETS_ARR.length) console.warn('[warn] No TARGETS/EPOCH_DIST set; you may see logs=0');
-
+if (!Array.isArray(stakingAbi) || (stakingAbi as any[]).length === 0) {
+  console.error('[abi] stakingAbi is missing or empty. Check import path and export style.');
+  process.exit(1);
+}
 // Derived tunables
 const CONF_LAG = Math.max(0, CONFIRMATIONS_NUM);
 const STEP_SIZE = Math.min(25_000, Math.max(1000, STEP_NUM));
@@ -439,20 +442,6 @@ async function insertClaim(txHashHex: string, logIndex: number, addressHex: stri
 }
 
 // ---------- Event dispatcher ----------
-type ParsedLog = {
-  name: string;
-  args: any;
-  log: RawLog;
-};
-
-function parseLog(log: RawLog): ParsedLog | null {
-  try {
-    const parsed = iface.parseLog({ data: log.data, topics: log.topics });
-    return { name: parsed?.name, args: parsed?.args, log };
-  } catch {
-    return null;
-  }
-}
 
 async function handleParsedLog(p: ParsedLog, blockTime: number) {
   const name = p.name;
