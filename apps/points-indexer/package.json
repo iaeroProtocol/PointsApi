@@ -1,7 +1,7 @@
 {
   "name": "iaero-points-indexer",
   "private": true,
-  "type": "module",
+  "type": "commonjs",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/indexer.js",

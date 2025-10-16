@@ -13,6 +13,6 @@
     "strict": true,
     "sourceMap": false
   },
-  "include": ["./**/*.ts"]
+  "include": ["indexer.ts", "abi.ts", "**/*.ts"]
 }
 
