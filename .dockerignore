@@ -1,0 +1,30 @@
+# Dependencies & caches
+node_modules
+node_modules
+**/node_modules
+*.log
+.cache
+npm-debug.log
+yarn-error.log
+pnpm-lock.yaml
+
+# VCS
+.git
+.gitignore
+
+# Local env
+.env
+.env.*
+
+# OS/Editor
+.DS_Store
+.vscode
+.idea
+
+# Tests / coverage
+coverage
+.nyc_output
+
+# Build artifacts
+dist
+build

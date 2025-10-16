@@ -1,0 +1,33 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "services": [
+    {
+      "name": "iaero-postgres",
+      "type": "postgres"
+    },
+    {
+      "name": "iaero-points-indexer",
+      "source": "/apps/points-indexer",
+      "env": {
+        "DATABASE_URL": { "fromService": "iaero-postgres", "env": "DATABASE_URL" },
+        "RPC_URL": "",
+        "TARGETS": "",
+        "CONFIRMATIONS": "3",
+        "STEP": "2000",
+        "POLL_MS": "6000",
+        "HEALTH_PORT": "8090"
+      },
+      "healthcheckPath": "/health",
+      "port": 8090
+    },
+    {
+      "name": "iaero-points-api",
+      "source": "/apps/points-api",
+      "env": {
+        "DATABASE_URL": { "fromService": "iaero-postgres", "env": "DATABASE_URL" }
+      },
+      "healthcheckPath": "/health",
+      "port": 8080
+    }
+  ]
+}

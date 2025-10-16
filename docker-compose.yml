@@ -1,0 +1,62 @@
+
+services:
+  db:
+    image: postgres:15
+    container_name: iaero-pg
+    environment:
+      POSTGRES_DB: iaero
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d iaero"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  points-indexer:
+    build:
+      context: .
+      dockerfile: apps/points-indexer/Dockerfile
+    container_name: iaero-points-indexer
+    environment:
+      # Local Postgres inside the compose network
+      DATABASE_URL: postgres://postgres:postgres@db:5432/iaero
+      # Chain envs pulled from your .env (compose auto-loads .env)
+      RPC_URL_BASE: ${RPC_URL_BASE}
+      CHAIN_ID: ${CHAIN_ID:-8453}
+      EPOCH_DIST: ${EPOCH_DIST}
+      CONFIRMATIONS: ${CONFIRMATIONS:-5}
+      START_BLOCK: "36908443"
+      TARGETS: ${TARGETS}  
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+
+  points-api:
+    build: 
+      context: .
+      dockerfile: apps/points-api/Dockerfile
+    container_name: iaero-points-api
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/iaero
+      PORT: ${PORT:-8080}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-600}
+    ports:
+      - "${PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  db-data:
+
