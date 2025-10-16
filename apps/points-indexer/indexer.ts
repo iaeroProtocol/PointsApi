@@ -38,10 +38,6 @@ const TARGETS_ARR: string[] = String(TARGETS_RAW || '')
 if (!DATABASE_URL) throw new Error('DATABASE_URL is required');
 if (!RPC_URL) throw new Error('RPC_URL (or RPC_URL_BASE) is required');
 if (!TARGETS_ARR.length) console.warn('[warn] No TARGETS/EPOCH_DIST set; you may see logs=0');
-if (!Array.isArray(stakingAbi) || (stakingAbi as any[]).length === 0) {
-  console.error('[abi] stakingAbi is missing or empty. Check import path and export style.');
-  process.exit(1);
-}
 // Derived tunables
 const CONF_LAG = Math.max(0, CONFIRMATIONS_NUM);
 const STEP_SIZE = Math.min(25_000, Math.max(1000, STEP_NUM));
@@ -81,10 +77,14 @@ function hexlifyAddress(addr: string) {
   return addr.toLowerCase();
 }
 
+
 // ---- ABI + topics (v5/v6 safe) ----
 import { stakingAbi } from './abi';
 
-if (!Array.isArray(stakingAbi) || stakingAbi.length === 0) {
+// Widen the tuple length to a plain number to avoid TS2367
+const abiLen: number = Array.isArray(stakingAbi) ? (stakingAbi as any[]).length : 0;
+
+if (abiLen === 0) {
   console.error('[abi] stakingAbi is missing or empty. Check import path and export style.');
   process.exit(1);
 }
