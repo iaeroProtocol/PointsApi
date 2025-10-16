@@ -197,6 +197,11 @@ async function ensureCheckpoint(defaultSeed: bigint) {
   return BigInt(res.rows[0].last_block);
 }
 
+async function saveCheckpoint(bn: bigint) {
+  await pg.query('update indexing_checkpoint set last_block=$1', [bn.toString()]);
+}
+
+
 async function heartbeatAccrual(nowTs: bigint) {
   // Accrue for wallets holding a balance whose last_ts < nowTs
   const { rows } = await pg.query(
