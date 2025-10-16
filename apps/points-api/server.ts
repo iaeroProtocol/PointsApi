@@ -1,7 +1,7 @@
 // apps/points-api/server.ts
 import 'dotenv/config';
 import fastify, { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { build } from './routes';
+import { build } from './routes.js';
 import crypto from 'node:crypto';
 // If this plugin is missing/incompatible, we won't crash on startup.
 let fastifyRawBody: any;
