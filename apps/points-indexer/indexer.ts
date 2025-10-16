@@ -18,6 +18,11 @@ const {
   HEALTH_PORT: HEALTH_PORT_RAW = '8090',
 } = process.env;
 
+console.log('[env] START_BLOCK_RAW=', START_BLOCK_RAW, 'parsed=', START_BLOCK_NUM);
+
+const FORCE_BACKFILL = String(process.env.FORCE_BACKFILL || '0') === '1';
+
+
 // strings (for drivers/URLs)
 const DATABASE_URL: string = String(DATABASE_URL_RAW);
 const RPC_URL: string = String(RPC_URL_RAW);
@@ -661,6 +666,13 @@ const server = http.createServer(async (_req, res) => {
 
   await runMigrations(safeHeadInit);
   let checkpoint = await ensureCheckpoint(safeHeadInit);
+  
+  // If forcing, reset the DB checkpoint to START_BLOCK on boot (idempotent)
+  if (FORCE_BACKFILL && START_BLOCK_NUM > 0) {
+    await saveCheckpoint(BigInt(START_BLOCK_NUM));
+    checkpoint = BigInt(START_BLOCK_NUM);
+    console.log('[init] forced checkpoint reset to START_BLOCK =', checkpoint.toString());
+  }
 
   console.log(`[init] checkpoint=${checkpoint} head=${safeHeadInit}`);
   if (checkpoint < safeHeadInit) {
