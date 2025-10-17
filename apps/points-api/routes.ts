@@ -88,13 +88,14 @@ export async function build(): Promise<FastifyInstance> {
       if (INDEXER_HEALTH) {
         const r = await fetch(INDEXER_HEALTH, { method: 'GET' });
         if (r.ok) {
-          const j: Partial<{
+          const j = (await r.json()) as Partial<{
             chainId: number;
             head: string | number;
             checkpoint: string | number;
             lag: number;
             targets: string[];
-          }> = await r.json();
+          }>;
+          
 
           return rep.send({
             ok: true,
