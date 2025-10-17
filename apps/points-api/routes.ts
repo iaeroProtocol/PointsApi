@@ -160,11 +160,21 @@ export async function build(): Promise<FastifyInstance> {
         last_ts: string | number | bigint;
         points_wei_days: string | number | bigint;
       };
+      // Compute rank dynamically from points (1-based), ties handled with RANK()
       const lb = await pool.query(
-        `SELECT rank, points FROM staking_points_leaderboard WHERE address = $1`,
+        `
+        WITH ranked AS (
+          SELECT address, RANK() OVER (ORDER BY points DESC) AS rnk
+          FROM staking_points_leaderboard
+        )
+        SELECT rnk AS rank
+        FROM ranked
+        WHERE address = $1
+        `,
         [buf]
       );
       const rank = lb.rowCount ? Number(lb.rows[0].rank) : null;
+
       
       return {
         address,
