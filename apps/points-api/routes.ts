@@ -164,7 +164,7 @@ export async function build(): Promise<FastifyInstance> {
       const lb = await pool.query(
         `
         WITH ranked AS (
-          SELECT address, RANK() OVER (ORDER BY points DESC) AS rnk
+          SELECT address, DENSE_RANK() OVER (ORDER BY points DESC) AS rnk
           FROM staking_points_leaderboard
         )
         SELECT rnk AS rank
@@ -191,19 +191,29 @@ export async function build(): Promise<FastifyInstance> {
     '/leaderboard',
     async (req: FastifyRequest<{ Querystring: LimitQuery }>) => {
       const limit = Math.min(Number(req.query?.limit ?? 100), 1000);
+
+      // Rank on-the-fly from points so we never depend on a stored/stale rank
       const q = await pool.query(
-        `SELECT address, points
-           FROM staking_points_leaderboard
-          ORDER BY rank ASC
-          LIMIT $1`,
+        `
+        SELECT
+          encode(address, 'hex') AS address,
+          points,
+          DENSE_RANK() OVER (ORDER BY points DESC) AS rank
+        FROM staking_points_leaderboard
+        ORDER BY points DESC, address
+        LIMIT $1
+        `,
         [limit]
       );
-      return q.rows.map((r: { address: Buffer; points: string }) => ({
-        address: toHex(r.address),
+
+      return q.rows.map((r: { address: string; points: string; rank: string | number }) => ({
+        address: '0x' + r.address,
         points: r.points,
+        rank: Number(r.rank),
       }));
     }
   );
+
 
   // ---------- /claimed/:address ----------
   app.get<{ Params: AddressParams }>(
