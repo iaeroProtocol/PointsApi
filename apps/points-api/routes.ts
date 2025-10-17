@@ -160,11 +160,18 @@ export async function build(): Promise<FastifyInstance> {
         last_ts: string | number | bigint;
         points_wei_days: string | number | bigint;
       };
+      const lb = await pool.query(
+        `SELECT rank, points FROM staking_points_leaderboard WHERE address = $1`,
+        [buf]
+      );
+      const rank = lb.rowCount ? Number(lb.rows[0].rank) : null;
+      
       return {
         address,
         points: toPointsDec(BigInt(r.points_wei_days)),
         lastBalance: r.last_balance,
         lastTimestamp: Number(r.last_ts),
+        rank, // 👈 NEW
       };
     }
   );
