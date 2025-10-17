@@ -30,7 +30,7 @@ const START_BLOCK_NUM: number = Number(START_BLOCK_RAW ?? 0);
 const CONFIRMATIONS_NUM: number = Number(CONFIRMATIONS_RAW);
 const STEP_NUM: number = Number(STEP_RAW);
 const POLL_MS_NUM: number = Number(POLL_MS_RAW);
-const HEALTH_PORT_NUM: number = Number(HEALTH_PORT_RAW);
+const HEALTH_PORT_NUM: number = Number(process.env.PORT ?? HEALTH_PORT_RAW ?? 8090);
 const HEARTBEAT_EVERY_SEC = Number(process.env.HEARTBEAT_EVERY_SEC || 300); // 5 min
 
 console.log('[env] START_BLOCK_RAW=', START_BLOCK_RAW, 'parsed=', START_BLOCK_NUM);

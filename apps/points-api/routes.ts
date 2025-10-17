@@ -5,6 +5,10 @@ import cors from '@fastify/cors';
 import { Pool } from 'pg';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const INDEXER_HEALTH =
+  process.env.INDEXER_HEALTH ||
+  process.env.INDEXER_HEALTH_URL || // optional legacy name
+  '';
 
 // ---------- helpers ----------
 function toPointsDec(weiSeconds: bigint) {
@@ -66,7 +70,63 @@ export async function build(): Promise<FastifyInstance> {
   // });
 
   // ---------- routes ----------
-  app.get('/health', async () => ({ ok: true }));
+  app.get('/health', async (_req, rep) => {
+    // Helper to get checkpoint from DB if the indexer health isn’t available
+    const checkpointFromDb = async (): Promise<string | null> => {
+      try {
+        const r = await pool.query('SELECT last_block FROM indexing_checkpoint LIMIT 1');
+        return r.rowCount ? String(r.rows[0].last_block) : null;
+      } catch {
+        return null;
+      }
+    };
+  
+    try {
+      if (INDEXER_HEALTH) {
+        const r = await fetch(INDEXER_HEALTH, { method: 'GET' });
+        if (r.ok) {
+          const j = await r.json();
+  
+          // Normalize fields (bigints as strings to avoid JSON issues)
+          return rep.send({
+            ok: true,
+            name: 'iaero-points-api',
+            chainId: j?.chainId ?? null,
+            head: j?.head ?? null,           // expect string or number
+            checkpoint: j?.checkpoint ?? null,
+            lag: j?.lag ?? null,
+            targets: Array.isArray(j?.targets) ? j.targets : [],
+          });
+        }
+      }
+  
+      // Fallback: DB-only (still lets the “Checkpoint” render)
+      const checkpoint = await checkpointFromDb();
+      return rep.send({
+        ok: true,
+        name: 'iaero-points-api',
+        chainId: null,
+        head: null,
+        checkpoint,
+        lag: null,
+        targets: [],
+        note: 'indexer health unavailable; using DB checkpoint only',
+      });
+    } catch (e: any) {
+      const checkpoint = await checkpointFromDb();
+      return rep.code(200).send({
+        ok: true,
+        name: 'iaero-points-api',
+        chainId: null,
+        head: null,
+        checkpoint,
+        lag: null,
+        targets: [],
+        note: `health error: ${String(e?.message || e)}; checkpoint from DB`,
+      });
+    }
+  });
+  
 
   app.get<{
     Params: AddressParams;
@@ -287,6 +347,26 @@ export async function build(): Promise<FastifyInstance> {
   
       return { ok: true, pushed, skipped, failed, processed: rows.length };
     });
+
+    app.get('/meta', async () => {
+      const q = await pool.query(`
+        SELECT
+          (SELECT COUNT(*) FROM staking_points_wallet)      AS wallets,
+          (SELECT COUNT(*) FROM staking_points_daily)       AS daily,
+          (SELECT COUNT(*) FROM staking_points_leaderboard) AS leaderboard,
+          (SELECT COUNT(*) FROM staking_claims)             AS claims,
+          (SELECT COUNT(*) FROM staking_claimers)           AS claimers
+      `);
+      const r = q.rows[0] || {};
+      return {
+        wallets: Number(r.wallets || 0),
+        daily: Number(r.daily || 0),
+        leaderboard: Number(r.leaderboard || 0),
+        claims: Number(r.claims || 0),
+        claimers: Number(r.claimers || 0),
+      };
+    });
+    
   
 
   return app;
