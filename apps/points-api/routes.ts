@@ -84,20 +84,27 @@ export async function build(): Promise<FastifyInstance> {
     try {
       if (INDEXER_HEALTH) {
         const r = await fetch(INDEXER_HEALTH, { method: 'GET' });
-        if (r.ok) {
-          const j = await r.json();
-  
-          // Normalize fields (bigints as strings to avoid JSON issues)
-          return rep.send({
-            ok: true,
-            name: 'iaero-points-api',
-            chainId: j?.chainId ?? null,
-            head: j?.head ?? null,           // expect string or number
-            checkpoint: j?.checkpoint ?? null,
-            lag: j?.lag ?? null,
-            targets: Array.isArray(j?.targets) ? j.targets : [],
-          });
-        }
+	  if (r.ok) {
+  	    // Type guard: tell TS what to expect
+  	    const j: Partial<{
+    	      chainId: number;
+    	      head: string | number;
+              checkpoint: string | number;
+    	      lag: number;
+    	      targets: string[];
+  	    }> = await r.json();
+
+  	    return rep.send({
+    	      ok: true,
+   	      name: 'iaero-points-api',
+              chainId: j.chainId ?? null,
+              head: j.head ?? null,
+              checkpoint: j.checkpoint ?? null,
+              lag: j.lag ?? null,
+              targets: Array.isArray(j.targets) ? j.targets : [],
+ 	    });
+	   }
+
       }
   
       // Fallback: DB-only (still lets the “Checkpoint” render)
