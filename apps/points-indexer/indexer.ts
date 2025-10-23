@@ -20,7 +20,6 @@ const {
 
 const FORCE_BACKFILL = String(process.env.FORCE_BACKFILL || '0') === '1';
 
-
 // strings (for drivers/URLs)
 const DATABASE_URL: string = String(DATABASE_URL_RAW);
 const RPC_URL: string = String(RPC_URL_RAW);
@@ -44,6 +43,7 @@ const TARGETS_ARR: string[] = String(TARGETS_RAW || '')
 if (!DATABASE_URL) throw new Error('DATABASE_URL is required');
 if (!RPC_URL) throw new Error('RPC_URL (or RPC_URL_BASE) is required');
 if (!TARGETS_ARR.length) console.warn('[warn] No TARGETS/EPOCH_DIST set; you may see logs=0');
+
 // Derived tunables
 const CONF_LAG = Math.max(0, CONFIRMATIONS_NUM);
 const STEP_SIZE = Math.min(25_000, Math.max(1000, STEP_NUM));
@@ -82,7 +82,6 @@ function makeProvider(rpc: string) {
 function hexlifyAddress(addr: string) {
   return addr.toLowerCase();
 }
-
 
 // ---- ABI + topics (v5/v6 safe) ----
 import { stakingAbi } from './abi';
@@ -189,7 +188,6 @@ async function runMigrations(defaultSeed?: bigint) {
   console.log('[boot] migrations complete');
 }
 
-
 async function ensureCheckpoint(defaultSeed: bigint) {
   const res = await pg.query('select last_block from indexing_checkpoint limit 1');
   if (res.rowCount === 0) {
@@ -204,7 +202,6 @@ async function ensureCheckpoint(defaultSeed: bigint) {
 async function saveCheckpoint(bn: bigint) {
   await pg.query('update indexing_checkpoint set last_block=$1', [bn.toString()]);
 }
-
 
 async function heartbeatAccrual(nowTs: bigint) {
   // Accrue for wallets holding a balance whose last_ts < nowTs
@@ -222,9 +219,6 @@ async function heartbeatAccrual(nowTs: bigint) {
     await adjustBalanceWithAccrual(addrHex, 0n, nowTs);
   }
 }
-
-
-
 
 // ---- RPC helpers ----
 const provider = makeProvider(RPC_URL);
@@ -248,17 +242,33 @@ async function getBlock(tsOrNum: number | bigint): Promise<any> {
   return (provider as any).getBlock(v);
 }
 
+// ---- Log types + normalizers ----
 type RawLog = {
   address: string;
   topics: string[];
   data: string;
   blockNumber: number;
-  logIndex: number;
-  transactionHash: string;
+  logIndex?: number;      // v5
+  index?: number;         // v6
+  transactionHash?: string; // v5
+  hash?: string;            // v6
   removed?: boolean;
 };
+
 function isDesiredTopic(log: RawLog) {
   return log.topics?.length && INTERESTING_TOPICS.includes(log.topics[0]);
+}
+
+function getLogIndex(log: RawLog): number {
+  const idx = (log.logIndex ?? log.index);
+  if (idx == null) throw new Error('missing log index on log');
+  return Number(idx);
+}
+
+function getTxHashHex(log: RawLog): string {
+  const h = (log.transactionHash ?? log.hash);
+  if (!h) throw new Error('missing tx hash on log');
+  return toNo0x(h);
 }
 
 // ---- Backoff wrapper for getLogs ----
@@ -361,7 +371,7 @@ function* splitByUtcDays(s: bigint, e: bigint): Generator<[string, bigint]> {
   }
 }
 
-// ---------- DB write helpers ----------
+// ---------- DB read/write helpers ----------
 async function getWalletRow(addressHex: string) {
   const r = await pg.query(
     'select last_balance, last_ts, points_wei_days from staking_points_wallet where address=decode($1, \'hex\')',
@@ -474,7 +484,6 @@ async function insertClaim(txHashHex: string, logIndex: number, addressHex: stri
 }
 
 // ---------- Event dispatcher ----------
-
 async function handleParsedLog(p: ParsedLog, blockTime: number) {
   const name = p.name;
   const log = p.log;
@@ -499,8 +508,10 @@ async function handleParsedLog(p: ParsedLog, blockTime: number) {
     }
     case 'RewardClaimed': {
       if (!addrUser) return;
-      const txHashHex = toNo0x(log.transactionHash);
-      await insertClaim(txHashHex, log.logIndex, addrUser, amountWei, bn, ts);
+      // v5/v6-safe fields
+      const txHashHex = getTxHashHex(log);
+      const li = getLogIndex(log);
+      await insertClaim(txHashHex, li, addrUser, amountWei, bn, ts);
       return;
     }
     default:
@@ -519,9 +530,10 @@ async function backfill(from: bigint, to: bigint) {
   while (cur <= to) {
     const end = cur + step - 1n > to ? to : cur + step - 1n;
     const logs = await getLogsWithRetry({ fromBlock: cur, toBlock: end }, TARGET_ADDRS, INTERESTING_TOPICS);
-    const wanted = logs.filter(isDesiredTopic);
+    const wanted = logs.filter((l) => isDesiredTopic(l) && !l.removed);
     totalLogs += wanted.length;
 
+    // group by block, then process logs in logIndex/index order for determinism
     const byBlock = new Map<number, RawLog[]>();
     for (const l of wanted) {
       const arr = byBlock.get(l.blockNumber) || [];
@@ -532,6 +544,8 @@ async function backfill(from: bigint, to: bigint) {
     for (const [bn, arr] of byBlock) {
       const blk = await getBlock(bn);
       const ts = Number(blk?.timestamp ?? 0);
+      // stable order within the block
+      arr.sort((a, b) => getLogIndex(a) - getLogIndex(b));
       for (const l of arr) {
         const p = parseLog(l);
         if (p) await handleParsedLog(p, ts);
@@ -567,7 +581,7 @@ async function liveTail(startFrom: bigint) {
           TARGET_ADDRS,
           INTERESTING_TOPICS
         );
-        const wanted = logs.filter(isDesiredTopic);
+        const wanted = logs.filter((l) => isDesiredTopic(l) && !l.removed);
 
         const byBlock = new Map<number, RawLog[]>();
         for (const l of wanted) {
@@ -580,9 +594,10 @@ async function liveTail(startFrom: bigint) {
         for (const [bn, arr] of byBlock) {
           const blk = await getBlock(bn);
           const ts = Number(blk?.timestamp ?? 0);
+          arr.sort((a, b) => getLogIndex(a) - getLogIndex(b));
           for (const l of arr) {
             const p = parseLog(l);
-            if (p && !l.removed) {
+            if (p) {
               await handleParsedLog(p, ts);
               count++;
             }
@@ -617,7 +632,6 @@ async function liveTail(startFrom: bigint) {
     return () => clearInterval(interval);
   }
 }
-
 
 // ---- Health endpoint (useful for Railway) ----
 let lastCheckpoint: bigint = 0n;
@@ -665,7 +679,7 @@ const server = http.createServer(async (_req, res) => {
 
   await runMigrations(safeHeadInit);
   let checkpoint = await ensureCheckpoint(safeHeadInit);
-  
+
   // If forcing, reset the DB checkpoint to START_BLOCK on boot (idempotent)
   if (FORCE_BACKFILL && START_BLOCK_NUM > 0) {
     await saveCheckpoint(BigInt(START_BLOCK_NUM));
