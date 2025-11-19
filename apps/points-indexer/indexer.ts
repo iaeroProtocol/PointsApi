@@ -483,7 +483,7 @@ async function insertClaim(txHashHex: string, logIndex: number, addressHex: stri
   );
 }
 
-// ---------- Event dispatcher ----------
+// ---------- Event dispatcher (CORRECTED LOGIC) ----------
 async function handleParsedLog(p: ParsedLog, blockTime: number) {
   const name = p.name;
   const log = p.log;
@@ -494,18 +494,20 @@ async function handleParsedLog(p: ParsedLog, blockTime: number) {
   const amountWei = p.args?.amount != null ? BigInt(p.args.amount.toString()) : 0n;
 
   switch (name) {
-    case 'Staked':
-    case 'StakedFor': {
+    case 'Staked': { // 🟢 Only process the core Staked event
       if (!addrUser) return;
       await adjustBalanceWithAccrual(addrUser, amountWei, ts);
       return;
     }
-    case 'Unstaked':
-    case 'Exited': {
+    // StakedFor event is now ignored, resolving the double-counting issue.
+    
+    case 'Unstaked': { // 🟢 Only process the core Unstaked event
       if (!addrUser) return;
       await adjustBalanceWithAccrual(addrUser, -amountWei, ts);
       return;
     }
+    // Exited event is now ignored, resolving the double-counting issue.
+
     case 'RewardClaimed': {
       if (!addrUser) return;
       // v5/v6-safe fields
@@ -680,11 +682,22 @@ const server = http.createServer(async (_req, res) => {
   await runMigrations(safeHeadInit);
   let checkpoint = await ensureCheckpoint(safeHeadInit);
 
-  // If forcing, reset the DB checkpoint to START_BLOCK on boot (idempotent)
-  if (FORCE_BACKFILL && START_BLOCK_NUM > 0) {
-    await saveCheckpoint(BigInt(START_BLOCK_NUM));
-    checkpoint = BigInt(START_BLOCK_NUM);
-    console.log('[init] forced checkpoint reset to START_BLOCK =', checkpoint.toString());
+  // If forcing, reset the DB checkpoint AND clear tables to prevent double counting
+  if (FORCE_BACKFILL) {
+    console.warn('[init] FORCE_BACKFILL=1 detected. TRUNCATING tables to prevent double-counting...');
+    await pg.query(`
+      TRUNCATE TABLE staking_points_wallet;
+      TRUNCATE TABLE staking_points_daily;
+      TRUNCATE TABLE staking_points_leaderboard;
+      TRUNCATE TABLE staking_claims;
+      TRUNCATE TABLE staking_claimers;
+    `);
+    
+    // Reset checkpoint
+    const startBn = START_BLOCK_NUM > 0 ? BigInt(START_BLOCK_NUM) : 0n;
+    await saveCheckpoint(startBn);
+    checkpoint = startBn;
+    console.log('[init] Reset complete. Starting from block', checkpoint.toString());
   }
 
   console.log(`[init] checkpoint=${checkpoint} head=${safeHeadInit}`);
