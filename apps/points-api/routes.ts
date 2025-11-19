@@ -14,6 +14,14 @@ function toPointsDec(weiSeconds: bigint) {
   const frac = (rem * 10_000_000n) / scale; // 7 dp
   return `${int}.${frac.toString().padStart(7, '0')}`;
 }
+function toBalanceDec(wei: string | number | bigint) {
+  const val = BigInt(wei);
+  const scale = 10n ** 18n;
+  const int = val / scale;
+  const rem = val % scale;
+  // format as "123.456..." with 18 decimal places
+  return `${int}.${rem.toString().padStart(18, '0')}`;
+}
 function toHex(buf: Buffer) {
   return '0x' + buf.toString('hex');
 }
@@ -192,23 +200,26 @@ export async function build(): Promise<FastifyInstance> {
     async (req: FastifyRequest<{ Querystring: LimitQuery }>) => {
       const limit = Math.min(Number(req.query?.limit ?? 100), 1000);
 
-      // Rank on-the-fly from points so we never depend on a stored/stale rank
+      // Join leaderboard (l) with wallet (w) to fetch the raw balance
       const q = await pool.query(
         `
         SELECT
-          encode(address, 'hex') AS address,
-          points,
-          DENSE_RANK() OVER (ORDER BY points DESC) AS rank
-        FROM staking_points_leaderboard
-        ORDER BY points DESC, address
+          encode(l.address, 'hex') AS address,
+          l.points,
+          w.last_balance,
+          DENSE_RANK() OVER (ORDER BY l.points DESC) AS rank
+        FROM staking_points_leaderboard l
+        JOIN staking_points_wallet w ON l.address = w.address
+        ORDER BY l.points DESC, l.address
         LIMIT $1
         `,
         [limit]
       );
 
-      return q.rows.map((r: { address: string; points: string; rank: string | number }) => ({
+      return q.rows.map((r: { address: string; points: string; last_balance: string; rank: string | number }) => ({
         address: '0x' + r.address,
         points: r.points,
+        totalStaked: toBalanceDec(r.last_balance), // Human-readable (e.g., "150.0000...")
         rank: Number(r.rank),
       }));
     }
