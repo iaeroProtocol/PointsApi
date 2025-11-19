@@ -194,23 +194,35 @@ export async function build(): Promise<FastifyInstance> {
     }
   );
 
-  // ---------- /leaderboard ----------
-  app.get<{ Querystring: LimitQuery }>(
-    '/leaderboard',
-    async (req: FastifyRequest<{ Querystring: LimitQuery }>) => {
-      const limit = Math.min(Number(req.query?.limit ?? 100), 1000);
+  // ---------- /leaderboard (UPDATED with Sort) ----------
+  // Add sort to the query type
+  type LeaderboardQuery = { limit?: string | number; sort?: string };
 
-      // Join leaderboard (l) with wallet (w) to fetch the raw balance
+  app.get<{ Querystring: LeaderboardQuery }>(
+    '/leaderboard',
+    async (req: FastifyRequest<{ Querystring: LeaderboardQuery }>) => {
+      const limit = Math.min(Number(req.query?.limit ?? 100), 1000);
+      
+      // Determine sort mode: 'points' (default) or 'staked'
+      const sortMode = req.query.sort === 'staked' ? 'staked' : 'points';
+
+      // Dynamic SQL generation
+      // 1. If sorting by staked, we rank/order by wallet balance (w.last_balance)
+      // 2. If sorting by points, we rank/order by leaderboard points (l.points)
+      const orderByClause = sortMode === 'staked' 
+        ? 'w.last_balance DESC' 
+        : 'l.points DESC';
+
       const q = await pool.query(
         `
         SELECT
           encode(l.address, 'hex') AS address,
           l.points,
           w.last_balance,
-          DENSE_RANK() OVER (ORDER BY l.points DESC) AS rank
+          DENSE_RANK() OVER (ORDER BY ${orderByClause}) AS rank
         FROM staking_points_leaderboard l
         JOIN staking_points_wallet w ON l.address = w.address
-        ORDER BY l.points DESC, l.address
+        ORDER BY ${orderByClause}, l.address
         LIMIT $1
         `,
         [limit]
@@ -219,7 +231,7 @@ export async function build(): Promise<FastifyInstance> {
       return q.rows.map((r: { address: string; points: string; last_balance: string; rank: string | number }) => ({
         address: '0x' + r.address,
         points: r.points,
-        totalStaked: toBalanceDec(r.last_balance), // Human-readable (e.g., "150.0000...")
+        totalStaked: toBalanceDec(r.last_balance),
         rank: Number(r.rank),
       }));
     }
