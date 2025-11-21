@@ -7,12 +7,14 @@ import { Pool } from 'pg';
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 // ---------- helpers ----------
+const WEI = 10n ** 18n;
+
+// Convert wei-days → "token-days" string with 18 decimals
 function toPointsDec(weiDays: bigint) {
-  const scale = 10n ** 18n; // 1e18, because points_wei_days is in wei-days
-  const int = weiDays / scale;
-  const rem = weiDays % scale;
-  const frac = (rem * 10_000_000n) / scale; // 7 dp, same style as before
-  return `${int}.${frac.toString().padStart(7, '0')}`;
+  const q = weiDays / WEI;
+  const r = weiDays % WEI;
+  const frac = r.toString().padStart(18, '0'); // 18 dp, same as leaderboard
+  return `${q}.${frac}`;
 }
 function toBalanceDec(wei: string | number | bigint) {
   const val = BigInt(wei);
@@ -155,37 +157,28 @@ export async function build(): Promise<FastifyInstance> {
       if (!/^0x[0-9a-f]{40}$/.test(address)) {
         return rep.code(400).send({ error: 'bad_address' });
       }
-  
+
       const buf = Buffer.from(address.slice(2), 'hex');
+
       const q = await pool.query(
         `SELECT last_balance, last_ts, points_wei_days
-           FROM staking_points_wallet
+          FROM staking_points_wallet
           WHERE address=$1`,
         [buf]
       );
       if (q.rowCount === 0) return rep.code(404).send({ error: 'not_found' });
-  
+
       const r = q.rows[0] as {
         last_balance: string | number | bigint;
         last_ts: string | number | bigint;
         points_wei_days: string | number | bigint;
       };
-  
-      // -------- LIVE ACCRUAL PREVIEW --------
-      const nowSec = BigInt(Math.floor(Date.now() / 1000));
-      const lastTs = BigInt(r.last_ts as any);
-      const lastBalWei = BigInt(r.last_balance as any);
-      let liveWeiDays = BigInt(r.points_wei_days as any); // stored wei-days
-  
-      if (nowSec > lastTs && lastBalWei > 0n) {
-        const dt = nowSec - lastTs;              // seconds
-        const extraWeiDays = (lastBalWei * dt) / 86400n; // additional wei-days
-        liveWeiDays += extraWeiDays;
-      }
-  
-      const points = toPointsDec(liveWeiDays);
-  
-      // -------- Rank from leaderboard --------
+
+      // ---- points: same unit as leaderboard (token-days with 18 decimals) ----
+      const weiDays = BigInt(r.points_wei_days as any);
+      const points = toPointsDec(weiDays);
+
+      // ---- rank: from leaderboard ----
       const lb = await pool.query(
         `
         WITH ranked AS (
@@ -199,17 +192,18 @@ export async function build(): Promise<FastifyInstance> {
         [buf]
       );
       const rank = lb.rowCount ? Number(lb.rows[0].rank) : null;
-  
+
       return {
         address,
-        points,                                   // same “units” as leaderboard
+        points,                                   // token-days (matches leaderboard)
         lastBalance: r.last_balance,             // raw wei
-        totalStaked: toBalanceDec(r.last_balance), // NEW: human-readable staked
+        totalStaked: toBalanceDec(r.last_balance), // NEW: human-readable tokens
         lastTimestamp: Number(r.last_ts),
         rank,
       };
     }
   );
+
   
   
 
