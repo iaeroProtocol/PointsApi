@@ -160,25 +160,38 @@ export async function build(): Promise<FastifyInstance> {
 
       const buf = Buffer.from(address.slice(2), 'hex');
 
-      const q = await pool.query(
+      // 1) Wallet row for balance + timestamps + raw wei-days (for future use if needed)
+      const wq = await pool.query(
         `SELECT last_balance, last_ts, points_wei_days
           FROM staking_points_wallet
-          WHERE address=$1`,
+          WHERE address = $1`,
         [buf]
       );
-      if (q.rowCount === 0) return rep.code(404).send({ error: 'not_found' });
+      if (wq.rowCount === 0) {
+        return rep.code(404).send({ error: 'not_found' });
+      }
 
-      const r = q.rows[0] as {
+      const w = wq.rows[0] as {
         last_balance: string | number | bigint;
         last_ts: string | number | bigint;
         points_wei_days: string | number | bigint;
       };
 
-      // ---- points: same unit as leaderboard (token-days with 18 decimals) ----
-      const weiDays = BigInt(r.points_wei_days as any);
-      const points = toPointsDec(weiDays);
+      // 2) Canonical points from leaderboard
+      const pq = await pool.query(
+        `SELECT points
+          FROM staking_points_leaderboard
+          WHERE address = $1`,
+        [buf]
+      );
 
-      // ---- rank: from leaderboard ----
+      // If for some reason there is no leaderboard entry, fall back to wei-days → decimal
+      const points: string =
+        pq.rowCount > 0
+          ? String(pq.rows[0].points)
+          : toPointsDec(BigInt(w.points_wei_days as any));
+
+      // 3) Rank from leaderboard
       const lb = await pool.query(
         `
         WITH ranked AS (
@@ -195,14 +208,15 @@ export async function build(): Promise<FastifyInstance> {
 
       return {
         address,
-        points,                                   // token-days (matches leaderboard)
-        lastBalance: r.last_balance,             // raw wei
-        totalStaked: toBalanceDec(r.last_balance), // NEW: human-readable tokens
-        lastTimestamp: Number(r.last_ts),
+        points,                                   // EXACTLY same as leaderboard.points
+        lastBalance: w.last_balance,             // raw wei
+        totalStaked: toBalanceDec(w.last_balance), // human-readable tokens
+        lastTimestamp: Number(w.last_ts),
         rank,
       };
     }
   );
+
 
   
   
