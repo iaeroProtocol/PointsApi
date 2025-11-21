@@ -185,11 +185,14 @@ export async function build(): Promise<FastifyInstance> {
         [buf]
       );
 
+      const lbRowCount = pq.rowCount ?? 0;
+
       // If for some reason there is no leaderboard entry, fall back to wei-days → decimal
       const points: string =
-        pq.rowCount > 0
+        lbRowCount > 0
           ? String(pq.rows[0].points)
           : toPointsDec(BigInt(w.points_wei_days as any));
+
 
       // 3) Rank from leaderboard
       const lb = await pool.query(
