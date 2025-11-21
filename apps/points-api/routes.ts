@@ -7,11 +7,11 @@ import { Pool } from 'pg';
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 // ---------- helpers ----------
-function toPointsDec(weiSeconds: bigint) {
-  const scale = 10n ** 18n * 86400n; // 1e18 * seconds/day
-  const int = weiSeconds / scale;
-  const rem = weiSeconds % scale;
-  const frac = (rem * 10_000_000n) / scale; // 7 dp
+function toPointsDec(weiDays: bigint) {
+  const scale = 10n ** 18n; // 1e18, because points_wei_days is in wei-days
+  const int = weiDays / scale;
+  const rem = weiDays % scale;
+  const frac = (rem * 10_000_000n) / scale; // 7 dp, same style as before
   return `${int}.${frac.toString().padStart(7, '0')}`;
 }
 function toBalanceDec(wei: string | number | bigint) {
@@ -155,6 +155,7 @@ export async function build(): Promise<FastifyInstance> {
       if (!/^0x[0-9a-f]{40}$/.test(address)) {
         return rep.code(400).send({ error: 'bad_address' });
       }
+  
       const buf = Buffer.from(address.slice(2), 'hex');
       const q = await pool.query(
         `SELECT last_balance, last_ts, points_wei_days
@@ -163,12 +164,28 @@ export async function build(): Promise<FastifyInstance> {
         [buf]
       );
       if (q.rowCount === 0) return rep.code(404).send({ error: 'not_found' });
+  
       const r = q.rows[0] as {
         last_balance: string | number | bigint;
         last_ts: string | number | bigint;
         points_wei_days: string | number | bigint;
       };
-      // Compute rank dynamically from points (1-based), ties handled with RANK()
+  
+      // -------- LIVE ACCRUAL PREVIEW --------
+      const nowSec = BigInt(Math.floor(Date.now() / 1000));
+      const lastTs = BigInt(r.last_ts as any);
+      const lastBalWei = BigInt(r.last_balance as any);
+      let liveWeiDays = BigInt(r.points_wei_days as any); // stored wei-days
+  
+      if (nowSec > lastTs && lastBalWei > 0n) {
+        const dt = nowSec - lastTs;              // seconds
+        const extraWeiDays = (lastBalWei * dt) / 86400n; // additional wei-days
+        liveWeiDays += extraWeiDays;
+      }
+  
+      const points = toPointsDec(liveWeiDays);
+  
+      // -------- Rank from leaderboard --------
       const lb = await pool.query(
         `
         WITH ranked AS (
@@ -182,17 +199,19 @@ export async function build(): Promise<FastifyInstance> {
         [buf]
       );
       const rank = lb.rowCount ? Number(lb.rows[0].rank) : null;
-
-      
+  
       return {
         address,
-        points: toPointsDec(BigInt(r.points_wei_days)),
-        lastBalance: r.last_balance,
+        points,                                   // same “units” as leaderboard
+        lastBalance: r.last_balance,             // raw wei
+        totalStaked: toBalanceDec(r.last_balance), // NEW: human-readable staked
         lastTimestamp: Number(r.last_ts),
-        rank, // 👈 NEW
+        rank,
       };
     }
   );
+  
+  
 
   // ---------- /leaderboard (UPDATED with Sort) ----------
   // Add sort to the query type
@@ -234,6 +253,118 @@ export async function build(): Promise<FastifyInstance> {
         totalStaked: toBalanceDec(r.last_balance),
         rank: Number(r.rank),
       }));
+    }
+  );
+
+  // ---------- /sync/zealy (NEW) ----------
+  app.post('/sync/zealy', async (req: FastifyRequest, reply: FastifyReply) => {
+    requireAdmin(req); // Only accessible with ZEALY_ADMIN_SECRET header
+    
+    // 1. Get all wallets linked to Zealy
+    const links = await pool.query(`
+      SELECT
+        t1.address,
+        t1.zealy_user_id,
+        COALESCE(t2.last_points_synced, 0) AS last_points_synced,
+        t3.points AS current_points
+      FROM zealy_user_links t1
+      LEFT JOIN zealy_xp_sync t2 ON t1.address = t2.address
+      JOIN staking_points_leaderboard t3 ON t1.address = t3.address
+      -- Only sync users who have more points than last time
+      WHERE t3.points > COALESCE(t2.last_points_synced, 0)
+    `);
+
+    const results: { synced: number, skipped: number, errors: number, details: any[] } = {
+      synced: 0,
+      skipped: 0,
+      errors: 0,
+      details: []
+    };
+
+    // 2. Process each wallet
+    for (const row of links.rows) {
+      const zealyId = row.zealy_user_id;
+      const currentPoints = parseFloat(row.current_points);
+      const lastSynced = parseFloat(row.last_points_synced);
+      
+      // Calculate the difference (XP to push)
+      const diffPoints = Math.floor(currentPoints - lastSynced);
+      
+      // Skip if somehow <= 0 (should be caught by WHERE clause but defensive)
+      if (diffPoints <= 0) {
+        results.skipped++;
+        continue;
+      }
+      
+      const hexAddress = '0x' + row.address.toString('hex');
+      
+      try {
+        // 3. Push XP to Zealy
+        await pushXP(zealyId, diffPoints, `Staking Points Sync (${hexAddress})`);
+        
+        // 4. Update the last synced amount in DB
+        await pool.query(
+          `
+          INSERT INTO zealy_xp_sync (address, last_points_synced, updated_at)
+          VALUES ($1, $2, now())
+          ON CONFLICT (address) DO UPDATE SET
+            last_points_synced = $2,
+            updated_at = now()
+          `,
+          [row.address, currentPoints.toFixed(18)] // Use full precision for tracking
+        );
+        
+        results.synced++;
+        results.details.push({
+          zealyId,
+          pointsPushed: diffPoints,
+          status: 'success'
+        });
+
+      } catch (e: any) {
+        results.errors++;
+        results.details.push({
+          zealyId,
+          pointsPushed: diffPoints,
+          status: 'error',
+          message: e.message || 'Unknown error'
+        });
+        console.error(`[zealy-sync] Error pushing XP for ${zealyId}:`, e.message);
+      }
+    }
+    
+    return results;
+  });
+
+  // ---------- /zealy/link (NEW) ----------
+  type LinkBody = { address: string, zealyUserId: string };
+  app.post<{ Body: LinkBody }>(
+    '/zealy/link',
+    async (req: FastifyRequest<{ Body: LinkBody }>, reply: FastifyReply) => {
+      const { address, zealyUserId } = req.body;
+      if (!address || !zealyUserId) {
+        return reply.code(400).send({ error: 'Missing address or zealyUserId' });
+      }
+
+      try {
+        await pool.query(
+          `
+          INSERT INTO zealy_user_links (zealy_user_id, address, linked_at)
+          VALUES ($1, decode($2, 'hex'), now())
+          ON CONFLICT (zealy_user_id) DO UPDATE SET
+            address = decode($2, 'hex'),
+            linked_at = now()
+          ON CONFLICT (address) DO UPDATE SET
+            zealy_user_id = $1,
+            linked_at = now()
+          `,
+          [zealyUserId, address.replace(/^0x/, '')]
+        );
+        return { ok: true };
+      } catch (e: any) {
+        console.error('Zealy link failed:', e.message);
+        return reply.code(500).send({ error: 'Database link failed' });
+      }
     }
   );
 
